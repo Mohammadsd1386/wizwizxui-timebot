@@ -5,6 +5,509 @@ check();
 $robotState = $botState['botState']??"on";
 
 GOTOSTART:
+
+// مدیریت وب اپ برای مشاهده کانفیگ
+if($data == 'webPanel' && $botState['WEB_PANEL_STATE'] == 'on'){
+    $token = generateUserPanelToken($from_id);
+    setUser($token, 'web_token');
+    
+    $webUrl = $botUrl . "/panel.php?token=" . $token;
+    $keyboard = [
+        [['text' => '🌐 ورود به پنل', 'web_app' => ['url' => $webUrl]]],
+        [['text' => $buttonValues['back_button'], 'callback_data' => 'mainMenu']]
+    ];
+    
+    editText($message_id, "🌐 پنل تحت وب\n\nاز طریق این پنل می‌توانید:\n• مشاهده کانفیگ‌ها\n• مدیریت سرویس‌ها\n• چت با پشتیبانی\n• خرید کانفیگ جدید", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// مدیریت تخفیفات هوشمند
+if($data == 'smartDiscounts' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $keyboard = [
+        [['text' => '📊 آمار کاربران تست', 'callback_data' => 'testUsersStats']],
+        [['text' => '🎯 ایجاد تخفیف هوشمند', 'callback_data' => 'createSmartDiscount']],
+        [['text' => '📈 مدیریت کمپین‌ها', 'callback_data' => 'manageCampaigns']],
+        [['text' => '💳 تخفیف کیف پول', 'callback_data' => 'walletDiscounts']],
+        [['text' => $buttonValues['back_button'], 'callback_data' => 'managePanel']]
+    ];
+    
+    editText($message_id, "🧠 تخفیفات هوشمند", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// آمار کاربران تست
+if($data == 'testUsersStats' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $stmt = $connection->prepare("SELECT COUNT(*) as count FROM `users` WHERE `free_trial` IS NOT NULL AND `free_trial` != ''");
+    $stmt->execute();
+    $testUsers = $stmt->get_result()->fetch_assoc()['count'];
+    $stmt->close();
+    
+    $stmt = $connection->prepare("SELECT COUNT(DISTINCT userid) as count FROM `orders_list` WHERE `status` = 1");
+    $stmt->execute();
+    $buyingUsers = $stmt->get_result()->fetch_assoc()['count'];
+    $stmt->close();
+    
+    $stmt = $connection->prepare("SELECT COUNT(*) as count FROM `users` WHERE `free_trial` IS NOT NULL AND `userid` NOT IN (SELECT DISTINCT userid FROM `orders_list` WHERE `status` = 1)");
+    $stmt->execute();
+    $testOnlyUsers = $stmt->get_result()->fetch_assoc()['count'];
+    $stmt->close();
+    
+    $message = "📊 آمار کاربران تست\n\n";
+    $message .= "👥 کل کاربران تست: $testUsers\n";
+    $message .= "💰 کاربران خریدار: $buyingUsers\n";
+    $message .= "🔍 فقط تست کننده: $testOnlyUsers\n";
+    $message .= "📈 نرخ تبدیل: " . round(($buyingUsers / $testUsers) * 100, 2) . "%";
+    
+    $keyboard = [
+        [['text' => '🎯 ایجاد تخفیف برای تست‌کنندگان', 'callback_data' => 'createTestUserDiscount']],
+        [['text' => '📅 کاربران غیرفعال', 'callback_data' => 'inactiveUsers']],
+        [['text' => $buttonValues['back_button'], 'callback_data' => 'smartDiscounts']]
+    ];
+    
+    editText($message_id, $message, json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// قرعه کشی بین اعضای کانال
+if($data == 'channelLottery' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $keyboard = [
+        [['text' => '🎉 ایجاد قرعه کشی جدید', 'callback_data' => 'createChannelLottery']],
+        [['text' => '📋 مدیریت قرعه کشی‌ها', 'callback_data' => 'manageLotteries']],
+        [['text' => '🏆 نتایج قرعه کشی‌ها', 'callback_data' => 'lotteryResults']],
+        [['text' => $buttonValues['back_button'], 'callback_data' => 'managePanel']]
+    ];
+    
+    editText($message_id, "🎰 قرعه کشی کانال", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// حذف کانفیگ کاربر از طریق ربات
+if(preg_match('/^deleteUserConfig(\d+)/', $data, $match) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $configId = $match[1];
+    
+    $stmt = $connection->prepare("SELECT * FROM `orders_list` WHERE `id` = ?");
+    $stmt->bind_param("i", $configId);
+    $stmt->execute();
+    $config = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    
+    if($config){
+        // حذف از سرور
+        deleteConfigFromServer($config['server_id'], $config['remark']);
+        
+        // علامت‌گذاری به عنوان حذف شده در دیتابیس
+        $stmt = $connection->prepare("UPDATE `orders_list` SET `status` = 0, `deleted_at` = ? WHERE `id` = ?");
+        $stmt->bind_param("ii", time(), $configId);
+        $stmt->execute();
+        $stmt->close();
+        
+        // ارسال پیام به کاربر
+        sendMessage("⚠️ کانفیگ شما توسط مدیریت حذف شد.\nرمارک: " . $config['remark'], null, null, $config['userid']);
+        
+        alert("✅ کانفیگ با موفقیت حذف شد");
+    }
+}
+
+// سیستم امتیازدهی پیشرفته
+if(preg_match('/^submitDetailedRating(\d+)/', $data, $match) && $botState['RATING_SYSTEM_STATE'] == 'on'){
+    $orderId = $match[1];
+    
+    $keyboard = [
+        [['text' => '⭐', 'callback_data' => "rateOrder{$orderId}_1"], ['text' => '⭐⭐', 'callback_data' => "rateOrder{$orderId}_2"]],
+        [['text' => '⭐⭐⭐', 'callback_data' => "rateOrder{$orderId}_3"], ['text' => '⭐⭐⭐⭐', 'callback_data' => "rateOrder{$orderId}_4"]],
+        [['text' => '⭐⭐⭐⭐⭐', 'callback_data' => "rateOrder{$orderId}_5"]],
+        [['text' => $buttonValues['cancel'], 'callback_data' => 'mainMenu']]
+    ];
+    
+    editText($message_id, "🌟 لطفا کیفیت سرویس را امتیازدهی کنید:", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// درخواست نمایندگی
+if($data == 'requestAgent'){
+    if($userInfo['is_agent'] == 1){
+        $referralCode = $userInfo['userid'];
+        $referralLink = "https://t.me/" . str_replace("@", "", $botUsername) . "?start=" . $referralCode;
+        
+        $message = "👨‍💼 شما نماینده فروش هستید!\n\n";
+        $message .= "🔗 لینک ارجاع شما:\n$referralLink\n\n";
+        $message .= "💰 درآمد شما از هر فروش: " . ($botState['agentCommission'] ?? 10) . "%\n";
+        $message .= "👥 تعداد زیرمجموعه: " . getAgentReferrals($from_id);
+        
+        $keyboard = [
+            [['text' => '📊 آمار نمایندگی', 'callback_data' => 'agentStats']],
+            [['text' => '💰 درخواست تسویه', 'callback_data' => 'requestSettlement']],
+            [['text' => $buttonValues['back_button'], 'callback_data' => 'otherFeatures']]
+        ];
+        
+        editText($message_id, $message, json_encode(['inline_keyboard' => $keyboard]));
+    } else {
+        $message = "👨‍💼 درخواست نمایندگی\n\n";
+        $message .= "شرایط کسب نمایندگی:\n";
+        $message .= "✅ حداقل یک خرید انجام شده\n";
+        $message .= "✅ عضویت در کانال پشتیبانی\n";
+        $message .= "✅ تایید مدیریت\n\n";
+        $message .= "آیا مایل به ارسال درخواست نمایندگی هستید؟";
+        
+        $keyboard = [
+            [['text' => '✅ ارسال درخواست', 'callback_data' => 'submitAgentRequest']],
+            [['text' => $buttonValues['back_button'], 'callback_data' => 'otherFeatures']]
+        ];
+        
+        editText($message_id, $message, json_encode(['inline_keyboard' => $keyboard]));
+    }
+}
+
+// گزارش مالی با بازه انتخابی
+if($data == 'financialReports' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $keyboard = [
+        [['text' => '📅 گزارش روزانه', 'callback_data' => 'dailyReport']],
+        [['text' => '📅 گزارش هفتگی', 'callback_data' => 'weeklyReport']],
+        [['text' => '📅 گزارش ماهانه', 'callback_data' => 'monthlyReport']],
+        [['text' => '📅 بازه دلخواه', 'callback_data' => 'customRangeReport']],
+        [['text' => $buttonValues['back_button'], 'callback_data' => 'managePanel']]
+    ];
+    
+    editText($message_id, "📊 گزارشات مالی", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// تایید نهایی تراکنش کارت به کارت
+if(preg_match('/^finalConfirmTransaction(\d+)/', $data, $match) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $transactionId = $match[1];
+    
+    $keyboard = [
+        [['text' => '✅ تایید تراکنش', 'callback_data' => "approveTransaction$transactionId"]],
+        [['text' => '❌ رسید جعلی', 'callback_data' => "fakeReceipt$transactionId"]],
+        [['text' => '🔍 بررسی بیشتر', 'callback_data' => "reviewTransaction$transactionId"]],
+        [['text' => $buttonValues['back_button'], 'callback_data' => 'managePanel']]
+    ];
+    
+    editText($message_id, "🔍 تایید نهایی تراکنش", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// مدیریت کانفیگ‌های منقضی شده
+if($data == 'manageExpiredConfigs' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $expiredDays = $botState['AUTO_DELETE_EXPIRED_DAYS'] ?? 3;
+    $expiredTime = time() - ($expiredDays * 24 * 60 * 60);
+    
+    $stmt = $connection->prepare("SELECT COUNT(*) as count FROM `orders_list` WHERE `expire_date` < ? AND `status` = 1");
+    $stmt->bind_param("i", $expiredTime);
+    $stmt->execute();
+    $expiredCount = $stmt->get_result()->fetch_assoc()['count'];
+    $stmt->close();
+    
+    $message = "🗑 مدیریت کانفیگ‌های منقضی\n\n";
+    $message .= "⏰ تعداد کانفیگ‌های منقضی: $expiredCount\n";
+    $message .= "📅 حذف خودکار پس از: $expiredDays روز";
+    
+    $keyboard = [
+        [['text' => '🗑 حذف خودکار همه', 'callback_data' => 'autoDeleteExpired']],
+        [['text' => '⚙️ تنظیم روزهای حذف', 'callback_data' => 'setDeleteDays']],
+        [['text' => '📋 لیست منقضی‌ها', 'callback_data' => 'listExpiredConfigs']],
+        [['text' => $buttonValues['back_button'], 'callback_data' => 'managePanel']]
+    ];
+    
+    editText($message_id, $message, json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// کمپین‌های خیریه
+if($data == 'charityDetails' && $botState['CHARITY_CAMPAIGNS_STATE'] == 'on'){
+    $stmt = $connection->prepare("SELECT * FROM `charity_campaigns` WHERE `active` = 1 ORDER BY `created_at` DESC LIMIT 1");
+    $stmt->execute();
+    $campaign = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    
+    if($campaign){
+        $collected = $campaign['collected_amount'] ?? 0;
+        $target = $campaign['target_amount'];
+        $percentage = round(($collected / $target) * 100, 1);
+        
+        $message = "❤️ " . $campaign['title'] . "\n\n";
+        $message .= $campaign['description'] . "\n\n";
+        $message .= "💰 هدف: " . number_format($target) . " تومان\n";
+        $message .= "✅ جمع‌آوری شده: " . number_format($collected) . " تومان\n";
+        $message .= "📊 پیشرفت: $percentage%\n\n";
+        $message .= "🔹 با هر خرید، درصدی به این کمپین اختصاص می‌یابد";
+        
+        $keyboard = [
+            [['text' => '💝 کمک مستقیم', 'callback_data' => "donateToCharity_" . $campaign['id']]],
+            [['text' => $buttonValues['back_button'], 'callback_data' => 'otherFeatures']]
+        ];
+        
+        editText($message_id, $message, json_encode(['inline_keyboard' => $keyboard]));
+    } else {
+        alert("در حال حاضر کمپین خیریه‌ای فعال نیست");
+    }
+}
+
+// نمایش آخرین زمان اتصال در کانفیگ‌های من
+if($data == 'myConfigs'){
+    $stmt = $connection->prepare("SELECT * FROM `orders_list` WHERE `userid` = ? AND `status` = 1 ORDER BY `date` DESC");
+    $stmt->bind_param("i", $from_id);
+    $stmt->execute();
+    $configs = $stmt->get_result();
+    $stmt->close();
+    
+    if($configs->num_rows > 0){
+        $keyboard = [];
+        while($config = $configs->fetch_assoc()){
+            $lastConnection = $config['last_connection'] ? jdate("Y/m/d H:i", $config['last_connection']) : "هرگز";
+            $status = $config['expire_date'] > time() ? "✅" : "❌";
+            
+            $keyboard[] = [['text' => "$status " . $config['remark'] . " (آخرین اتصال: $lastConnection)", 'callback_data' => "configDetails_" . $config['id']]];
+        }
+        
+        $keyboard[] = [['text' => $buttonValues['back_button'], 'callback_data' => 'mainMenu']];
+        
+        editText($message_id, "📱 کانفیگ‌های من", json_encode(['inline_keyboard' => $keyboard]));
+    } else {
+        alert("شما هنوز کانفیگی خریداری نکرده‌اید");
+    }
+}
+
+// مدیریت تمدید خودکار
+if(preg_match('/^toggleAutoRenewal(\d+)/', $data, $match)){
+    $configId = $match[1];
+    
+    $stmt = $connection->prepare("SELECT * FROM `orders_list` WHERE `id` = ? AND `userid` = ?");
+    $stmt->bind_param("ii", $configId, $from_id);
+    $stmt->execute();
+    $config = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    
+    if($config){
+        $newStatus = $config['auto_renewal'] == 1 ? 0 : 1;
+        
+        $stmt = $connection->prepare("UPDATE `orders_list` SET `auto_renewal` = ? WHERE `id` = ?");
+        $stmt->bind_param("ii", $newStatus, $configId);
+        $stmt->execute();
+        $stmt->close();
+        
+        $statusText = $newStatus == 1 ? "فعال" : "غیرفعال";
+        alert("تمدید خودکار $statusText شد");
+        
+        // نمایش مجدد جزئیات کانفیگ
+        $keyboard = getUserOrderDetailKeys($configId);
+        if($keyboard) editKeys($keyboard);
+    }
+}
+
+// درگاه پرداخت استارز
+if(preg_match('/^payWithStars(\d+)/', $data, $match) && $botState['STARS_PAYMENT_STATE'] == 'on'){
+    $amount = $match[1];
+    $starsAmount = ceil($amount / $botState['STARS_RATE']); // نرخ تبدیل تومان به استار
+    
+    $invoice = [
+        'title' => 'شارژ کیف پول',
+        'description' => "شارژ کیف پول به مبلغ " . number_format($amount) . " تومان",
+        'payload' => "stars_payment_$amount",
+        'provider_token' => '', // برای استارز خالی است
+        'currency' => 'XTR',
+        'prices' => [['label' => 'شارژ کیف پول', 'amount' => $starsAmount]]
+    ];
+    
+    bot('sendInvoice', array_merge(['chat_id' => $from_id], $invoice));
+}
+
+// مدیریت شماره کارت‌های متعدد
+if($data == 'manageBankAccounts' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $stmt = $connection->prepare("SELECT * FROM `bank_accounts` WHERE `active` = 1");
+    $stmt->execute();
+    $accounts = $stmt->get_result();
+    $stmt->close();
+    
+    $keyboard = [];
+    while($account = $accounts->fetch_assoc()){
+        $keyboard[] = [['text' => $account['bank_name'] . " - " . substr($account['card_number'], -4), 'callback_data' => "editBankAccount_" . $account['id']]];
+    }
+    
+    $keyboard[] = [['text' => '➕ افزودن کارت جدید', 'callback_data' => 'addNewBankAccount']];
+    $keyboard[] = [['text' => $buttonValues['back_button'], 'callback_data' => 'gateWays_Channels']];
+    
+    editText($message_id, "💳 مدیریت شماره کارت‌ها", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// نمایش ظرفیت سرورها
+if($data == 'buyConfig'){
+    $stmt = $connection->prepare("SELECT sc.*, si.title as server_title, si.capacity, (SELECT COUNT(*) FROM orders_list WHERE server_id = sc.id AND status = 1) as used_capacity FROM `server_categories` sc JOIN `server_info` si ON sc.server_id = si.id WHERE sc.active = 1 ORDER BY sc.sort_order");
+    $stmt->execute();
+    $categories = $stmt->get_result();
+    $stmt->close();
+    
+    $keyboard = [];
+    while($cat = $categories->fetch_assoc()){
+        $capacity = $cat['capacity'] ?? 999;
+        $used = $cat['used_capacity'];
+        $available = $capacity - $used;
+        $capacityText = $available > 0 ? "($available/$capacity)" : "(پر)";
+        
+        if($available > 0){
+            $keyboard[] = [['text' => $cat['title'] . " " . $capacityText, 'callback_data' => "serverCat_" . $cat['id']]];
+        }
+    }
+    
+    $keyboard[] = [['text' => $buttonValues['back_button'], 'callback_data' => 'mainMenu']];
+    
+    editText($message_id, "🛒 انتخاب سرور (ظرفیت/استفاده)", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// سیستم تشخیص تقلب پیشرفته
+if(preg_match('/^fraudDetection/', $data) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $keyboard = [
+        [['text' => '🔍 بررسی تراکنش‌های مشکوک', 'callback_data' => 'suspiciousTransactions']],
+        [['text' => '👥 کاربران پرخطر', 'callback_data' => 'riskyUsers']],
+        [['text' => '📊 آمار تقلب', 'callback_data' => 'fraudStats']],
+        [['text' => '⚙️ تنظیمات تشخیص', 'callback_data' => 'fraudSettings']],
+        [['text' => $buttonValues['back_button'], 'callback_data' => 'managePanel']]
+    ];
+    
+    editText($message_id, "🛡 سیستم تشخیص تقلب", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// مدیریت subscription پنل
+if($data == 'panelSubscription' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $stmt = $connection->prepare("SELECT * FROM `panel_subscriptions` ORDER BY `expire_date` ASC");
+    $stmt->execute();
+    $subscriptions = $stmt->get_result();
+    $stmt->close();
+    
+    $message = "📊 وضعیت Subscription پنل‌ها:\n\n";
+    $keyboard = [];
+    
+    while($sub = $subscriptions->fetch_assoc()){
+        $expireDate = jdate("Y/m/d", $sub['expire_date']);
+        $daysLeft = ceil(($sub['expire_date'] - time()) / 86400);
+        $status = $daysLeft > 0 ? "✅ فعال" : "❌ منقضی";
+        
+        $message .= "🔹 " . $sub['panel_name'] . "\n";
+        $message .= "   انقضا: $expireDate ($daysLeft روز)\n";
+        $message .= "   وضعیت: $status\n\n";
+        
+        $keyboard[] = [['text' => $sub['panel_name'], 'callback_data' => "managePanelSub_" . $sub['id']]];
+    }
+    
+    $keyboard[] = [['text' => '➕ افزودن پنل جدید', 'callback_data' => 'addNewPanelSub']];
+    $keyboard[] = [['text' => $buttonValues['back_button'], 'callback_data' => 'managePanel']];
+    
+    editText($message_id, $message, json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// پیام‌های زمان‌بندی شده
+if($data == 'scheduledMessages' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $stmt = $connection->prepare("SELECT * FROM `scheduled_messages` WHERE `sent` = 0 AND `send_time` > ? ORDER BY `send_time` ASC");
+    $stmt->bind_param("i", time());
+    $stmt->execute();
+    $messages = $stmt->get_result();
+    $stmt->close();
+    
+    $keyboard = [];
+    while($msg = $messages->fetch_assoc()){
+        $sendTime = jdate("Y/m/d H:i", $msg['send_time']);
+        $keyboard[] = [['text' => substr($msg['message'], 0, 30) . "... - $sendTime", 'callback_data' => "editScheduledMsg_" . $msg['id']]];
+    }
+    
+    $keyboard[] = [['text' => '➕ پیام جدید', 'callback_data' => 'createScheduledMessage']];
+    $keyboard[] = [['text' => $buttonValues['back_button'], 'callback_data' => 'managePanel']];
+    
+    editText($message_id, "⏰ پیام‌های زمان‌بندی شده", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// مدیریت آموزش‌ها توسط ادمین
+if($data == 'manageTutorials' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $categories = ['ios' => '📱 iOS', 'android' => '🤖 Android', 'windows' => '💻 Windows', 'mac' => '🖥 macOS'];
+    $keyboard = [];
+    
+    foreach($categories as $cat => $title){
+        $stmt = $connection->prepare("SELECT COUNT(*) as count FROM `tutorials` WHERE `category` = ?");
+        $stmt->bind_param("s", $cat);
+        $stmt->execute();
+        $count = $stmt->get_result()->fetch_assoc()['count'];
+        $stmt->close();
+        
+        $keyboard[] = [['text' => "$title ($count)", 'callback_data' => "manageTutorialCat_$cat"]];
+    }
+    
+    $keyboard[] = [['text' => '➕ آموزش جدید', 'callback_data' => 'addNewTutorial']];
+    $keyboard[] = [['text' => $buttonValues['back_button'], 'callback_data' => 'managePanel']];
+    
+    editText($message_id, "📚 مدیریت آموزش‌ها", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// فعال/غیرفعال کردن تمام کانفیگ‌های کاربر
+if(preg_match('/^toggleAllUserConfigs(\d+)/', $data, $match) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $userId = $match[1];
+    
+    $stmt = $connection->prepare("SELECT * FROM `orders_list` WHERE `userid` = ? AND `status` = 1");
+    $stmt->bind_param("i", $userId);
+    $stmt->execute();
+    $configs = $stmt->get_result();
+    $stmt->close();
+    
+    $keyboard = [
+        [['text' => '✅ فعال کردن همه', 'callback_data' => "enableAllConfigs_$userId"]],
+        [['text' => '❌ غیرفعال کردن همه', 'callback_data' => "disableAllConfigs_$userId"]],
+        [['text' => $buttonValues['back_button'], 'callback_data' => 'managePanel']]
+    ];
+    
+    $message = "⚙️ مدیریت کانفیگ‌های کاربر\n\n";
+    $message .= "👤 کاربر: $userId\n";
+    $message .= "📱 تعداد کانفیگ: " . $configs->num_rows;
+    
+    editText($message_id, $message, json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// بکاپ فوری دیتابیس
+if($data == 'createBackup' && $from_id == $admin){
+    $backupFile = createDatabaseBackup();
+    if($backupFile){
+        bot('sendDocument', [
+            'chat_id' => $botState['BACKUP_CHANNEL'],
+            'document' => new CURLFile($backupFile),
+            'caption' => "💾 بکاپ خودکار دیتابیس\n📅 " . jdate("Y/m/d H:i:s")
+        ]);
+        
+        alert("✅ بکاپ با موفقیت ایجاد و ارسال شد");
+        unlink($backupFile); // حذف فایل محلی
+    } else {
+        alert("❌ خطا در ایجاد بکاپ");
+    }
+}
+
+// کامندهای آماده
+if($text == '/buy' || $text == '/خرید'){
+    $text = $buttonValues['buy_config'];
+    goto GOTOSTART;
+}
+
+if($text == '/tutorial' || $text == '/آموزش'){
+    $data = 'tutorials';
+    goto GOTOSTART;
+}
+
+if($text == '/charge' || $text == '/شارژ'){
+    $data = 'chargeWallet';
+    goto GOTOSTART;
+}
+
+if(strstr($text, "/start tutorial_") && $botState['DEEP_LINK_STATE'] == 'on'){
+    $tutorialId = str_replace("/start tutorial_", "", $text);
+    showTutorial($tutorialId);
+    exit();
+}
+
+if(strstr($text, "/start buy_") && $botState['DEEP_LINK_STATE'] == 'on'){
+    $planId = str_replace("/start buy_", "", $text);
+    $userInfo['step'] = "buy_plan_" . $planId;
+    setUser("buy_plan_" . $planId);
+    showPlanDetails($planId);
+    exit();
+}
+
+if(strstr($text, "/start charge_") && $botState['DEEP_LINK_STATE'] == 'on'){
+    $amount = str_replace("/start charge_", "", $text);
+    if(is_numeric($amount) && $amount >= $botState['MINIMUM_WALLET_CHARGE'] && $amount <= $botState['MAXIMUM_WALLET_CHARGE']){
+        $userInfo['step'] = "charge_wallet_" . $amount;
+        setUser("charge_wallet_" . $amount);
+        sendMessage("💰 شارژ کیف پول\n\nمبلغ: " . number_format($amount) . " تومان\n\nلطفا روش پرداخت را انتخاب کنید:", getPaymentMethods($amount));
+    }
+    exit();
+}
+
 if ($userInfo['step'] == "banned" && $from_id != $admin && $userInfo['isAdmin'] != true) {
     sendMessage($mainValues['banned']);
     exit();
@@ -15,6 +518,150 @@ if(is_numeric($checkSpam)){
     sendMessage("اکانت شما به دلیل اسپم مسدود شده است\nزمان آزادسازی اکانت شما: \n$time");
     exit();
 }
+// مدیریت قرعه کشی
+if($data == 'lottery' && $botState['LOTTERY_STATE'] == 'on'){
+    $stmt = $connection->prepare("SELECT * FROM `lottery` WHERE `status` = 1 AND `end_date` > ?");
+    $stmt->bind_param("i", time());
+    $stmt->execute();
+    $activeLotteries = $stmt->get_result();
+    $stmt->close();
+    
+    if($activeLotteries->num_rows > 0){
+        $keyboard = [];
+        while($lottery = $activeLotteries->fetch_assoc()){
+            $keyboard[] = [['text' => $lottery['title'], 'callback_data' => 'joinLottery' . $lottery['id']]];
+        }
+        $keyboard[] = [['text' => $buttonValues['back_button'], 'callback_data' => 'mainMenu']];
+        
+        editText($message_id, "🎉 قرعه کشی های فعال", json_encode(['inline_keyboard' => $keyboard]));
+    } else {
+        alert("هیچ قرعه کشی فعالی وجود ندارد");
+    }
+}
+
+if(preg_match('/^joinLottery(\d+)/', $data, $match)){
+    $lotteryId = $match[1];
+    $stmt = $connection->prepare("SELECT * FROM `lottery` WHERE `id` = ? AND `status` = 1 AND `end_date` > ?");
+    $stmt->bind_param("ii", $lotteryId, time());
+    $stmt->execute();
+    $lottery = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    
+    if($lottery){
+        $participants = json_decode($lottery['participants'], true) ?? [];
+        if(!in_array($from_id, $participants)){
+            $participants[] = $from_id;
+            $stmt = $connection->prepare("UPDATE `lottery` SET `participants` = ? WHERE `id` = ?");
+            $stmt->bind_param("si", json_encode($participants), $lotteryId);
+            $stmt->execute();
+            $stmt->close();
+            
+            alert("✅ شما با موفقیت در قرعه کشی شرکت کردید");
+        } else {
+            alert("❌ شما قبلاً در این قرعه کشی شرکت کرده اید");
+        }
+    }
+}
+
+// سیستم امتیازدهی
+if(preg_match('/^rateService(\d+)/', $data, $match) && $botState['RATING_SYSTEM_STATE'] == 'on'){
+    $orderId = $match[1];
+    $keyboard = [];
+    for($i = 1; $i <= 5; $i++){
+        $stars = str_repeat("⭐", $i);
+        $keyboard[] = [['text' => $stars, 'callback_data' => "submitRating{$orderId}_{$i}"]];
+    }
+    $keyboard[] = [['text' => $buttonValues['cancel'], 'callback_data' => 'mainMenu']];
+    
+    editText($message_id, "لطفا به سرویس دریافتی امتیاز دهید:", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+if(preg_match('/^submitRating(\d+)_(\d+)/', $data, $match) && $botState['RATING_SYSTEM_STATE'] == 'on'){
+    $orderId = $match[1];
+    $rating = $match[2];
+    
+    $stmt = $connection->prepare("SELECT * FROM `user_ratings` WHERE `user_id` = ? AND `order_id` = ?");
+    $stmt->bind_param("ii", $from_id, $orderId);
+    $stmt->execute();
+    $existingRating = $stmt->get_result();
+    $stmt->close();
+    
+    if($existingRating->num_rows == 0){
+        $stmt = $connection->prepare("INSERT INTO `user_ratings` (`user_id`, `order_id`, `rating`, `rating_date`) VALUES (?, ?, ?, ?)");
+        $stmt->bind_param("iiii", $from_id, $orderId, $rating, time());
+        $stmt->execute();
+        $stmt->close();
+        
+        editText($message_id, "✅ با تشکر از شما!\nامتیاز شما ثبت شد.");
+        
+        sendMessage("اگر مایل هستید، نظر یا پیشنهاد خود را در مورد سرویس بنویسید:", $cancelKey);
+        setUser("ratingComment_" . $orderId);
+    } else {
+        alert("شما قبلاً به این سرویس امتیاز داده اید");
+    }
+}
+
+
+// دیگر امکانات (بخش جدید)
+if($data == 'otherFeatures'){
+    $keyboard = [
+        [['text' => '📚 آموزش اتصال', 'callback_data' => 'tutorials']],
+        [['text' => '🎉 قرعه کشی', 'callback_data' => 'lottery']],
+        [['text' => '💰 کسب درآمد', 'callback_data' => 'earnMoney']],
+        [['text' => '📊 آمار من', 'callback_data' => 'myStats']],
+    ];
+    
+    if($userInfo['is_agent'] == 1){
+        $keyboard[] = [['text' => '👨‍💼 پنل نمایندگی', 'callback_data' => 'agentPanel']];
+    } else {
+        $keyboard[] = [['text' => '👨‍💼 درخواست نمایندگی', 'callback_data' => 'requestAgent']];
+    }
+    
+    $keyboard[] = [['text' => $buttonValues['back_button'], 'callback_data' => 'mainMenu']];
+    
+    editText($message_id, "🎛 دیگر امکانات", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+// مدیریت آموزش‌ها
+if($data == 'tutorials'){
+    $categories = ['ios' => '📱 iOS', 'android' => '🤖 Android', 'windows' => '💻 Windows', 'mac' => '🖥 macOS'];
+    $keyboard = [];
+    
+    foreach($categories as $cat => $title){
+        $stmt = $connection->prepare("SELECT COUNT(*) as count FROM `tutorials` WHERE `category` = ? AND `active` = 1");
+        $stmt->bind_param("s", $cat);
+        $stmt->execute();
+        $count = $stmt->get_result()->fetch_assoc()['count'];
+        $stmt->close();
+        
+        if($count > 0){
+            $keyboard[] = [['text' => "$title ($count)", 'callback_data' => "tutorialCat_$cat"]];
+        }
+    }
+    
+    $keyboard[] = [['text' => $buttonValues['back_button'], 'callback_data' => 'otherFeatures']];
+    editText($message_id, "📚 دسته بندی آموزش ها", json_encode(['inline_keyboard' => $keyboard]));
+}
+
+if(preg_match('/^tutorialCat_(.+)/', $data, $match)){
+    $category = $match[1];
+    $stmt = $connection->prepare("SELECT * FROM `tutorials` WHERE `category` = ? AND `active` = 1 ORDER BY `order_num`");
+    $stmt->bind_param("s", $category);
+    $stmt->execute();
+    $tutorials = $stmt->get_result();
+    $stmt->close();
+    
+    $keyboard = [];
+    while($tutorial = $tutorials->fetch_assoc()){
+        $keyboard[] = [['text' => $tutorial['title'], 'callback_data' => "showTutorial_" . $tutorial['id']]];
+    }
+    $keyboard[] = [['text' => $buttonValues['back_button'], 'callback_data' => 'tutorials']];
+    
+    $categories = ['ios' => '📱 iOS', 'android' => '🤖 Android', 'windows' => '💻 Windows', 'mac' => '🖥 macOS'];
+    editText($message_id, "📚 آموزش های " . $categories[$category], json_encode(['inline_keyboard' => $keyboard]));
+}
+
+
 if(preg_match("/^haveJoined(.*)/",$data,$match)){
     if ($joniedState== "kicked" || $joniedState== "left"){
         alert($mainValues['not_joine_yet']);
@@ -133,8 +780,8 @@ if(preg_match('/^\/([Ss]tart)/', $text) or $text == $buttonValues['back_to_main'
             sendMessage(str_replace(["FULLNAME", "USERNAME", "USERID"], ["<a href='tg://user?id=$from_id'>$first_name</a>", $username, $from_id], $mainValues['new_member_joined'])
                 ,$keys, "html",$admin);
         }
-        sendMessage($mainValues['start_message'],getMainKeys());
-    }
+        $startMessage = str_replace("USER-NAME", $userInfo['display_name'] ?? $userInfo['name'], $mainValues['start_message']);
+        sendMessage($startMessage, getMainKeys());    }
 }
 if(preg_match('/^sendMessageToUser(\d+)/',$data,$match) && ($from_id == $admin || $userInfo['isAdmin'] == true) && $text != $buttonValues['cancel']){
     editText($message_id,'🔘|لطفا پیامت رو بفرست');

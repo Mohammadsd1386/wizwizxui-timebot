@@ -298,6 +298,13 @@ function getMainKeys(){
     }
     array_push($mainKeys,$temp);
     if($from_id == $admin || $userInfo['isAdmin'] == true) array_push($mainKeys,[['text'=>"مدیریت ربات ⚙️",'callback_data'=>"managePanel"]]);
+    if($botState['otherFeaturesState'] == "on"){
+        $keyboard[] = [['text' => $buttonValues['other_features'], 'callback_data' => 'otherFeatures']];
+    }
+    
+    if($botState['WEB_PANEL_STATE'] == 'on'){
+        $keyboard[] = [['text' => $buttonValues['web_panel'], 'callback_data' => 'webPanel']];
+    }
     return json_encode(['inline_keyboard'=>$mainKeys]); 
 }
 function getAgentKeys(){
@@ -6218,5 +6225,266 @@ sendMessage(curl_error($curl));
     curl_close($curl);
     return json_decode($response);
 }
+function formatBytes($bytes, $precision = 2) {
+    $units = array('B', 'KB', 'MB', 'GB', 'TB');
+    
+    for ($i = 0; $bytes > 1024 && $i < count($units) - 1; $i++) {
+        $bytes /= 1024;
+    }
+    
+    return round($bytes, $precision) . ' ' . $units[$i];
+}
+
+function generateUserPanelToken($userId){
+    return hash('sha256', $userId . time() . 'secret_key');
+}
+
+function sendConfigWithQR($configLink, $caption){
+    global $from_id;
+    // ایجاد QR Code و ارسال
+    sendMessage($configLink);
+}
+
+// توابع مدیریت بکاپ
+function createDatabaseBackup(){
+    global $connection;
+    
+    $backupFile = "backup_" . date("Y-m-d_H-i-s") . ".sql";
+    $command = "mysqldump --user=" . DB_USER . " --password=" . DB_PASS . " --host=" . DB_HOST . " " . DB_NAME . " > $backupFile";
+    
+    exec($command, $output, $return);
+    
+    return $return === 0 ? $backupFile : false;
+}
+
+// تولید توکن پنل کاربری
+function generateUserPanelToken($userId){
+    return hash('sha256', $userId . time() . 'secret_panel_key');
+}
+
+// دریافت تعداد ارجاعات نماینده
+function getAgentReferrals($agentId){
+    global $connection;
+    
+    $stmt = $connection->prepare("SELECT COUNT(*) as count FROM `users` WHERE `refered_by` = ?");
+    $stmt->bind_param("i", $agentId);
+    $stmt->execute();
+    $result = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    
+    return $result['count'];
+}
+
+// حذف کانفیگ از سرور
+function deleteConfigFromServer($serverId, $remark){
+    global $connection;
+    
+    $stmt = $connection->prepare("SELECT * FROM `server_config` WHERE `id` = ?");
+    $stmt->bind_param("i", $serverId);
+    $stmt->execute();
+    $server = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    
+    if($server['type'] == 'marzban'){
+        return deleteMarzbanUser($serverId, $remark);
+    } else {
+        return deleteXUIUser($serverId, $remark);
+    }
+}
+
+// ارسال کانفیگ با QR Code
+function sendConfigWithQR($configLink, $caption, $userId = null){
+    global $from_id;
+    
+    $chatId = $userId ?? $from_id;
+    
+    // ایجاد QR Code
+    $qrUrl = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" . urlencode($configLink);
+    
+    // ارسال عکس QR
+    bot('sendPhoto', [
+        'chat_id' => $chatId,
+        'photo' => $qrUrl,
+        'caption' => $caption
+    ]);
+    
+    // ارسال لینک متنی
+    sendMessage("📱 لینک کانفیگ:\n\n`$configLink`", null, "Markdown", $chatId);
+}
+
+// بررسی ظرفیت سرور
+function checkServerCapacity($serverId){
+    global $connection;
+    
+    $stmt = $connection->prepare("SELECT capacity FROM `server_info` WHERE `id` = ?");
+    $stmt->bind_param("i", $serverId);
+    $stmt->execute();
+    $server = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    
+    $stmt = $connection->prepare("SELECT COUNT(*) as used FROM `orders_list` WHERE `server_id` = ? AND `status` = 1");
+    $stmt->bind_param("i", $serverId);
+    $stmt->execute();
+    $used = $stmt->get_result()->fetch_assoc()['used'];
+    $stmt->close();
+    
+    $capacity = $server['capacity'] ?? 999;
+    return $capacity - $used;
+}
+
+// انتخاب تصادفی کارت بانکی
+function getRandomBankAccount(){
+    global $connection;
+    
+    $stmt = $connection->prepare("SELECT * FROM `bank_accounts` WHERE `active` = 1 ORDER BY RAND() LIMIT 1");
+    $stmt->execute();
+    $account = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    
+    return $account;
+}
+
+// مدیریت تخفیفات ساعتی
+function applyHourlyDiscount($serverId, $planId){
+    global $connection, $botState;
+    
+    $currentHour = date('H');
+    
+    $stmt = $connection->prepare("SELECT * FROM `hourly_discounts` WHERE `server_id` = ? AND `start_hour` <= ? AND `end_hour` >= ? AND `active` = 1");
+    $stmt->bind_param("iii", $serverId, $currentHour, $currentHour);
+    $stmt->execute();
+    $discount = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    
+    return $discount['discount_percent'] ?? 0;
+}
+
+// ارسال پیام برای کاربران با موجودی بالا
+function notifyHighBalanceUsers(){
+    global $connection, $mainValues, $buttonValues;
+    
+    $minBalance = 100000; // حداقل موجودی برای ارسال پیام
+    
+    $stmt = $connection->prepare("SELECT * FROM `users` WHERE `wallet` >= ? AND `last_balance_notification` < ?");
+    $stmt->bind_param("ii", $minBalance, time() - 86400); // یک بار در روز
+    $stmt->execute();
+    $users = $stmt->get_result();
+    $stmt->close();
+    
+    while($user = $users->fetch_assoc()){
+        $displayName = $user['display_name'] ?? $user['name'];
+        $balance = number_format($user['wallet']);
+        
+        $message = str_replace(["USER-NAME", "BALANCE"], [$displayName, $balance], $mainValues['high_balance_notification']);
+        
+        $keyboard = [
+            [['text' => $buttonValues['buy_config'], 'callback_data' => 'buyConfig']],
+            [['text' => $buttonValues['request_settlement'], 'callback_data' => 'requestSettlement']]
+        ];
+        
+        sendMessage($message, json_encode(['inline_keyboard' => $keyboard]), null, $user['userid']);
+        
+        // به‌روزرسانی زمان آخرین اطلاع‌رسانی
+        $stmt = $connection->prepare("UPDATE `users` SET `last_balance_notification` = ? WHERE `userid` = ?");
+        $stmt->bind_param("ii", time(), $user['userid']);
+        $stmt->execute();
+        $stmt->close();
+    }
+}
+
+// پردازش تمدید خودکار
+function processAutoRenewals(){
+    global $connection, $mainValues, $buttonValues;
+    
+    $tomorrow = time() + 86400; // 24 ساعت آینده
+    
+    $stmt = $connection->prepare("SELECT * FROM `orders_list` WHERE `auto_renewal` = 1 AND `expire_date` BETWEEN ? AND ? AND `status` = 1");
+    $stmt->bind_param("ii", time(), $tomorrow);
+    $stmt->execute();
+    $expiring = $stmt->get_result();
+    $stmt->close();
+    
+    while($order = $expiring->fetch_assoc()){
+        $userId = $order['userid'];
+        $planPrice = $order['amount'];
+        
+        // بررسی موجودی کاربر
+        $stmt = $connection->prepare("SELECT wallet FROM `users` WHERE `userid` = ?");
+        $stmt->bind_param("i", $userId);
+        $stmt->execute();
+        $user = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        
+        if($user['wallet'] >= $planPrice){
+            // کسر از موجودی
+            $stmt = $connection->prepare("UPDATE `users` SET `wallet` = `wallet` - ? WHERE `userid` = ?");
+            $stmt->bind_param("ii", $planPrice, $userId);
+            $stmt->execute();
+            $stmt->close();
+            
+            // تمدید سرویس
+            $newExpireDate = $order['expire_date'] + (30 * 24 * 60 * 60); // 30 روز
+            $stmt = $connection->prepare("UPDATE `orders_list` SET `expire_date` = ? WHERE `id` = ?");
+            $stmt->bind_param("ii", $newExpireDate, $order['id']);
+            $stmt->execute();
+            $stmt->close();
+            
+            // ارسال پیام تایید
+            $message = "✅ سرویس شما با موفقیت تمدید شد\n\n";
+            $message .= "🔖 رمارک: " . $order['remark'] . "\n";
+            $message .= "⏰ تاریخ انقضای جدید: " . jdate("Y/m/d", $newExpireDate) . "\n";
+            $message .= "💰 مبلغ کسر شده: " . number_format($planPrice) . " تومان";
+            
+            sendMessage($message, null, null, $userId);
+        } else {
+            // موجودی کافی نیست
+            $message = "⚠️ تمدید خودکار ناموفق\n\n";
+            $message .= "موجودی کیف پول شما برای تمدید کافی نیست\n";
+            $message .= "💰 موجودی فعلی: " . number_format($user['wallet']) . " تومان\n";
+            $message .= "💸 مبلغ مورد نیاز: " . number_format($planPrice) . " تومان";
+            
+            $keyboard = [
+                [['text' => $buttonValues['charge_wallet'], 'callback_data' => 'chargeWallet']],
+                [['text' => $buttonValues['renew_service'], 'callback_data' => 'renewConfig_' . $order['id']]]
+            ];
+            
+            sendMessage($message, json_encode(['inline_keyboard' => $keyboard]), null, $userId);
+        }
+    }
+}
+
+// بررسی و حذف کانفیگ‌های قدیمی از ربات
+function cleanupOldConfigs(){
+    global $connection;
+    
+    $stmt = $connection->prepare("SELECT * FROM `orders_list` WHERE `status` = 1");
+    $stmt->execute();
+    $configs = $stmt->get_result();
+    $stmt->close();
+    
+    while($config = $configs->fetch_assoc()){
+        $serverId = $config['server_id'];
+        $remark = $config['remark'];
+        
+        // بررسی وجود در پنل
+        $exists = checkConfigExistsOnServer($serverId, $remark);
+        
+        if(!$exists){
+            // حذف از دیتابیس ربات
+            $stmt = $connection->prepare("UPDATE `orders_list` SET `status` = 0, `deleted_reason` = 'not_found_on_panel' WHERE `id` = ?");
+            $stmt->bind_param("i", $config['id']);
+            $stmt->execute();
+            $stmt->close();
+            
+            // اطلاع به کاربر
+            $message = "⚠️ کانفیگ شما از پنل حذف شده است\n";
+            $message .= "🔖 رمارک: $remark\n";
+            $message .= "📞 لطفا با پشتیبانی تماس بگیرید";
+            
+            sendMessage($message, null, null, $config['userid']);
+        }
+    }
+}
 
 ?>
+
