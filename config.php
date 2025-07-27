@@ -1,27 +1,48 @@
 <?php
-include_once "settings/values.php";
-include_once 'settings/jdf.php';
-include_once 'baseInfo.php';
+include_once __DIR__ . '/settings/values.php';
+include_once __DIR__ . '/settings/jdf.php';
+include_once __DIR__ . '/baseInfo.php';
 
-$connection = new mysqli('localhost',$dbUserName,$dbPassword,$dbName);
-if($connection->connect_error){
-    exit("error " . $connection->connect_error);  
+$connection = new mysqli('localhost', $dbUserName, $dbPassword, $dbName);
+if ($connection->connect_error) {
+    error_log("Database connection failed: " . $connection->connect_error);
+    die("Connection failed: " . $connection->connect_error);
 }
+echo "Database connected successfully!"; 
 $connection->set_charset("utf8mb4");
 
 function bot($method, $datas = []){
     global $botToken;
-    $url = "https://api.telegram.org/bot" . $botToken . "/" . $method;
-    $ch = curl_init(); 
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); 
-    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($datas));
-    $res = curl_exec($ch);
-    if (curl_error($ch)) {
-        var_dump(curl_error($ch));
-    } else {
-        return json_decode($res);
+    
+    if (empty($botToken)) {
+        error_log("Bot token is empty in bot() function");
+        return false;
     }
+    
+    $url = "https://api.telegram.org/bot" . $botToken . "/" . $method;
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($datas));
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); 
+    
+    $res = curl_exec($ch);
+    $curl_error = curl_error($ch);
+    curl_close($ch);
+    
+    if ($curl_error) {
+        error_log("CURL Error in bot(): " . $curl_error);
+        return false;
+    }
+    
+    $result = json_decode($res);
+    if (!$result) {
+        error_log("Invalid JSON response: " . $res);
+        return false;
+    }
+    
+    return $result;
 }
 function sendMessage($txt, $key = null, $parse ="MarkDown", $ci= null, $msg = null){
     global $from_id;
